@@ -14,6 +14,26 @@ const languageMap = {
   63: { image: "cpp-sandbox:latest", cmd: "g++", ext: "cpp", dockerfile: "./dockerfiles/cpp" }
 };
 
+async function acquireLock(key, timeout = 10000) {
+  const lockKey = `lock:${key}`;
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    // NX = only set if not exists, PX = expiration in ms
+    const result = await redis.set(lockKey, "locked", "NX", "PX", timeout);
+    if (result === "OK") return true; // lock acquired
+    await new Promise(r => setTimeout(r, 100)); // wait 100ms before retry
+  }
+
+  throw new Error(`Failed to acquire lock for ${key}`);
+}
+
+async function releaseLock(key) {
+  const lockKey = `lock:${key}`;
+  await redis.del(lockKey);
+}
+
+
 // Build Docker image if it doesn't exist
 async function ensureImage(lang) {
   try {
@@ -38,8 +58,24 @@ async function processJob(job) {
     return;
   }
 
+  async function ensureImageWithLock(lang) {
+  const lockKey = `docker-build:${lang.image}`;
+  let lockAcquired = false;
+
+  try {
+    // Try to acquire lock before building
+    lockAcquired = await acquireLock(lockKey, 30000); // 30s timeout
+    await ensureImage(lang); // build only if not exists
+  } finally {
+    if (lockAcquired) {
+      await releaseLock(lockKey);
+    }
+  }
+}
+
   // Ensure Docker image exists
-  await ensureImage(lang);
+// Instead of directly calling ensureImage(lang)
+  await ensureImageWithLock(lang);
 
   // Create temp file for the submission
   const filename = path.join("/tmp", `${id}.${lang.ext}`);
